@@ -48,13 +48,14 @@ pub fn main() !void {
     }
     var rng: std.Random.RomuTrio = .init(1);
     const random = rng.random();
-    const updates = 100;
+    const updates = 20;
 
     var tube: zoncom.Tube(Record) = try .initEmpty(alloc);
     defer tube.deinit();
 
     const begin = std.time.nanoTimestamp();
-    for (0..updates) |_| {
+    for (0..updates) |u| {
+        std.log.info("{d}/{d}", .{ u + 1, updates });
         for (0..keys) |id| {
             const key = key_names[key_width * id .. key_width * (id + 1)];
             try tube.add(key, Record.random(random));
