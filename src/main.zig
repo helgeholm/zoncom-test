@@ -3,21 +3,15 @@ const zoncom = @import("zoncom");
 
 const log = std.log.scoped(.example);
 
-var clock: u64 = 0;
-fn timestamp() u64 {
-    defer clock += 1;
-    return clock;
-}
-
 const Record = struct {
     some_text: []const u8,
     some_float: f64,
-    ms_timestamp: u64,
+    ms_timestamp: i64,
     pub fn random(rng: std.Random) Record {
         return .{
             .some_text = example_texts[@mod(rng.int(u8), example_texts.len)],
             .some_float = rng.float(f64),
-            .ms_timestamp = timestamp(),
+            .ms_timestamp = std.time.milliTimestamp(),
         };
     }
 };
@@ -32,6 +26,26 @@ const example_texts: []const []const u8 = &.{
     "Four five six!",
     "Steven hate wine!",
     "Ten ben be my fren.",
+};
+
+const UpdateReceiver = struct {
+    last_ms_ts: i64 = 0,
+    delta_low: i64 = std.math.maxInt(i64),
+    delta_high: i64 = std.math.minInt(i64),
+    delta_sum: i64 = 0,
+    delta_count: usize = 0,
+    pub fn receive(self_ptr: *anyopaque, r: Record) void {
+        var self: *UpdateReceiver = @ptrCast(@alignCast(self_ptr));
+        self.last_ms_ts = r.ms_timestamp;
+    }
+    pub fn delta(self_ptr: *anyopaque) void {
+        const self: *UpdateReceiver = @ptrCast(@alignCast(self_ptr));
+        const d = std.time.milliTimestamp() - self.last_ms_ts;
+        self.delta_low = @min(self.delta_low, d);
+        self.delta_high = @max(self.delta_high, d);
+        self.delta_sum += d;
+        self.delta_count += 1;
+    }
 };
 
 pub fn main() !void {
@@ -50,8 +64,11 @@ pub fn main() !void {
     const random = rng.random();
     const updates = 20;
 
-    var tube: zoncom.Tube(Record) = try .initEmpty(alloc);
+    var tube: zoncom.Tube(Record) = try .init(alloc, true);
     defer tube.deinit();
+    var receiver: UpdateReceiver = .{};
+    tube.on_added_end = &UpdateReceiver.delta;
+    try tube.listen(&receiver, &UpdateReceiver.receive);
 
     const begin = std.time.nanoTimestamp();
     for (0..updates) |u| {
@@ -65,9 +82,14 @@ pub fn main() !void {
 
     const ns_per_full_update = @divTrunc(diff, updates);
     const ns_per_single_update = @divTrunc(ns_per_full_update, keys);
+    log.info("== Writing time ==", .{});
     logTime("Total Time", diff);
     logTime("Avg per full update", ns_per_full_update);
     logTime("Avg per single update", ns_per_single_update);
+    log.info("== Receive latency ==", .{});
+    log.info("Average {d:.3}ms", .{@as(f64, @floatFromInt(receiver.delta_sum)) / @as(f64, @floatFromInt(receiver.delta_count))});
+    log.info("Lowest: {d}ms", .{receiver.delta_low});
+    log.info("Highest: {d}ms", .{receiver.delta_high});
 }
 
 fn logTime(comptime desc: []const u8, ns: i128) void {
