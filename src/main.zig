@@ -29,45 +29,42 @@ const example_texts: []const []const u8 = &.{
 };
 
 const UpdateReceiver = struct {
-    last_ms_ts: i64 = 0,
     delta_low: i64 = std.math.maxInt(i64),
     delta_high: i64 = std.math.minInt(i64),
     delta_sum: i64 = 0,
     delta_count: usize = 0,
-    pub fn receive(self_ptr: *anyopaque, r: Record) void {
+    pub fn receive(self_ptr: *anyopaque, _: []const u8, r: Record) void {
         var self: *UpdateReceiver = @ptrCast(@alignCast(self_ptr));
-        self.last_ms_ts = r.ms_timestamp;
-    }
-    pub fn delta(self_ptr: *anyopaque) void {
-        const self: *UpdateReceiver = @ptrCast(@alignCast(self_ptr));
-        const d = std.time.milliTimestamp() - self.last_ms_ts;
+        const d = std.time.milliTimestamp() - r.ms_timestamp;
         self.delta_low = @min(self.delta_low, d);
         self.delta_high = @max(self.delta_high, d);
         self.delta_sum += d;
         self.delta_count += 1;
+        if (@mod(self.delta_count, 1000) == 0) {
+            std.debug.print("received {d}\n", .{self.delta_count});
+        }
     }
 };
 
 pub fn main() !void {
     var alloc = std.heap.page_allocator;
-    const keys = 10_000;
-    const key_width: usize = @intFromFloat(@round(@log10(@as(f64, @floatFromInt(keys - 1)))));
+    const keys = 1_000;
+    const key_width = 3;
     const key_names = try alloc.alloc(u8, keys * key_width);
     for (0..keys) |i| {
         _ = try std.fmt.bufPrint(
             key_names[key_width * i .. key_width * i + key_width],
-            "{d:04}",
+            "{d:03}",
             .{i},
         );
     }
     var rng: std.Random.RomuTrio = .init(1);
     const random = rng.random();
-    const updates = 20;
+    const updates = 5;
 
     var tube: zoncom.Tube(Record) = try .init(alloc, true);
     defer tube.deinit();
     var receiver: UpdateReceiver = .{};
-    tube.on_added_end = &UpdateReceiver.delta;
     try tube.listen(&receiver, &UpdateReceiver.receive);
 
     const begin = std.time.nanoTimestamp();
@@ -76,7 +73,9 @@ pub fn main() !void {
         for (0..keys) |id| {
             const key = key_names[key_width * id .. key_width * (id + 1)];
             try tube.add(key, Record.random(random));
+            std.Thread.sleep(std.time.ns_per_ms);
         }
+        std.Thread.sleep(5 * std.time.ns_per_s);
     }
     const diff = std.time.nanoTimestamp() - begin;
 

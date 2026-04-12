@@ -24,6 +24,10 @@ running: bool = false,
 pub fn start(self: *Watcher) Errors!void {
     try self.setup_watch();
     self.running = true;
+    try self.read_all_files();
+}
+
+fn read_all_files(self: Watcher) Errors!void {
     var it = self.dir.iterate();
     while (it.next() catch |err| return mapItErr(err)) |entry| {
         if (!std.mem.endsWith(u8, entry.name, ".tmp"))
@@ -46,6 +50,7 @@ fn mapItErr(err: std.fs.Dir.Iterator.Error) Errors {
 
 fn watch(self: *Watcher) !void {
     const METADATA_SIZE = @sizeOf(fanotify.event_metadata);
+    var queue_overloaded: bool = false;
     var buf: [4096]u8 = undefined;
     var epoll_events: [1]std.posix.system.epoll_event = .{.{
         .events = std.os.linux.EPOLL.IN,
@@ -59,25 +64,34 @@ fn watch(self: *Watcher) !void {
     );
     var rem_events: []u8 = &.{};
     while (self.running) {
-        if (std.posix.epoll_wait(self.epoll_fd, &epoll_events, 100) == 0) {
+        if (std.posix.epoll_wait(self.epoll_fd, &epoll_events, 10) == 0) {
+            if (!self.running) break;
             if (rem_events.len > 0) return error.UnexpectedEof;
+            if (queue_overloaded) try self.read_all_files();
+            queue_overloaded = false;
             continue;
         }
         const size = try std.posix.read(self.fan_fd, buf[rem_events.len..]);
         rem_events = buf[0 .. rem_events.len + size];
         while (rem_events.len >= METADATA_SIZE) {
             const em: [*]align(1) const fanotify.event_metadata = @ptrCast(rem_events);
-            if (em[0].mask != fanotify.MarkMask{ .MOVED_TO = true })
-                @panic("Received event other than MOVED_TO");
-            if (rem_events.len < METADATA_SIZE + em[0].event_len)
+            if (rem_events.len < em[0].event_len)
                 break; // incomplete event, loop to read rest
             var rem_info = rem_events[METADATA_SIZE..em[0].event_len];
+            rem_events = rem_events[em[0].event_len..];
+            if (em[0].mask.Q_OVERFLOW)
+                queue_overloaded = true;
+            if (queue_overloaded)
+                continue;
+            if (em[0].mask != fanotify.MarkMask{ .MOVED_TO = true })
+                @panic("Received event other than MOVED_TO");
+            if (em[0].fd != -1)
+                @panic("Excpected FAN_NOFD");
             while (rem_info.len > 0) {
                 const eif: [*]align(1) fanotify.event_info_fid = @ptrCast(rem_info);
                 self.process_fanotify_event(&eif[0]);
                 rem_info = rem_info[eif[0].hdr.len..];
             }
-            rem_events = rem_events[em[0].event_len..];
         }
         @memmove(buf[0..rem_events.len], rem_events);
     }
@@ -164,8 +178,9 @@ fn errorCheck(retval: anytype) !void {
 }
 
 fn errorCheckValue(retval: anytype) !i32 {
-    if (retval >= 0) return @intCast(retval);
-    return switch (@as(std.posix.E, @enumFromInt(-@as(isize, @bitCast(retval))))) {
+    const s_retval = @as(isize, @bitCast(retval));
+    if (s_retval >= 0) return @intCast(retval);
+    return switch (@as(std.posix.E, @enumFromInt(-s_retval))) {
         std.posix.E.MFILE => Errors.FanotifyLimitExceeded,
         std.posix.E.NOMEM => Errors.OutOfMemory,
         std.posix.E.NOSYS => Errors.FanotifyNotSupported,
