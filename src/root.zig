@@ -1,6 +1,7 @@
 const std = @import("std");
 const Watcher = @import("Watcher.zig");
 
+const log = std.log.scoped(.zoncom_tube);
 const parent_path = "/tmp";
 const sub_path = "tube";
 
@@ -11,6 +12,7 @@ pub fn Tube(comptime T: type) type {
         parser_arena: std.heap.ArenaAllocator,
         alloc_writer: std.Io.Writer.Allocating,
         dir: std.fs.Dir,
+        should_log: bool,
         seen_pos: std.StringHashMap(u64) = undefined,
         on_added: *const fn (*anyopaque, []const u8, T) void = undefined,
         on_added_ptr: *anyopaque = undefined,
@@ -19,27 +21,36 @@ pub fn Tube(comptime T: type) type {
         io_buffer: [1024]u8 = undefined,
         pub fn init(
             allocator: std.mem.Allocator,
-            start_empty: bool,
+            options: struct {
+                start_empty: bool = false,
+                log: bool = false,
+            },
         ) !TTube {
             var parent_dir = try std.fs.openDirAbsolute(parent_path, .{});
             defer parent_dir.close();
-            if (start_empty) try parent_dir.deleteTree(sub_path);
+            if (options.start_empty) try parent_dir.deleteTree(sub_path);
             return .{
                 .parser_arena = .init(allocator),
                 .alloc_writer = .init(allocator),
                 .seen_pos = .init(allocator),
                 .dir = try parent_dir.makeOpenPath(sub_path, .{ .iterate = true }),
                 .mutex = .{},
+                .should_log = options.log,
             };
         }
         pub fn listen(self: *TTube, on_added_ptr: *anyopaque, on_added: *const fn (*anyopaque, []const u8, T) void) !void {
             self.on_added_ptr = on_added_ptr;
             self.on_added = on_added;
-            self.watcher = .{ .dir = self.dir, .on_renamed_ptr = self, .on_renamed = on_file_updated };
+            self.watcher = .{
+                .dir = self.dir,
+                .on_renamed_ptr = self,
+                .on_renamed = onFileUpdated,
+                .should_log = self.should_log,
+            };
             try self.watcher.?.start();
         }
         /// Thread safe
-        fn on_file_updated(self_ptr: *anyopaque, notified_file_name: []const u8) void {
+        fn onFileUpdated(self_ptr: *anyopaque, notified_file_name: []const u8) void {
             var self: *TTube = @ptrCast(@alignCast(self_ptr));
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -50,13 +61,13 @@ pub fn Tube(comptime T: type) type {
                 notified_file_name[0 .. notified_file_name.len - 4]
             else
                 notified_file_name;
-            self.read_updated_file(file_name) catch |err| {
+            self.readUpdatedFile(file_name) catch |err| {
                 var buf: [300]u8 = undefined;
                 const m = std.fmt.bufPrint(&buf, "Error reading update on {s}: {}", .{ file_name, err }) catch unreachable;
                 @panic(m);
             };
         }
-        fn read_updated_file(self: *TTube, file_name: []const u8) !void {
+        fn readUpdatedFile(self: *TTube, file_name: []const u8) !void {
             var file = try self.dir.openFile(file_name, .{});
             const seen_gop = try self.seen_pos.getOrPut(file_name);
             if (!seen_gop.found_existing) {
@@ -144,6 +155,7 @@ const NextFile = struct {
             if (err == error.FileNotFound) return;
             return err;
         };
+        defer ex_file.close();
         var fr = ex_file.readerStreaming(&.{});
         _ = try tmp_file.sendFileAll(&fr, .unlimited);
     }

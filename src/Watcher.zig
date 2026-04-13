@@ -3,6 +3,8 @@ const fanotify = std.os.linux.fanotify;
 
 const Watcher = @This();
 
+const log = std.log.scoped(.zoncom_watcher);
+
 const Errors = error{
     FanotifyLimitExceeded,
     FanotifyNotSupported,
@@ -20,14 +22,19 @@ fan_fd: i32 = undefined,
 epoll_fd: i32 = undefined,
 watch_thread: std.Thread = undefined,
 running: bool = false,
+should_log: bool = false,
 
 pub fn start(self: *Watcher) Errors!void {
-    try self.setup_watch();
+    try self.setupWatch();
     self.running = true;
-    try self.read_all_files();
+    try self.readAllFiles();
 }
 
-fn read_all_files(self: Watcher) Errors!void {
+fn logWarn(self: Watcher, comptime fmt: []const u8, stuff: anytype) void {
+    if (self.should_log) log.warn(fmt, stuff);
+}
+
+fn readAllFiles(self: Watcher) Errors!void {
     var it = self.dir.iterate();
     while (it.next() catch |err| return mapItErr(err)) |entry| {
         if (!std.mem.endsWith(u8, entry.name, ".tmp"))
@@ -67,7 +74,7 @@ fn watch(self: *Watcher) !void {
         if (std.posix.epoll_wait(self.epoll_fd, &epoll_events, 10) == 0) {
             if (!self.running) break;
             if (rem_events.len > 0) return error.UnexpectedEof;
-            if (queue_overloaded) try self.read_all_files();
+            if (queue_overloaded) try self.readAllFiles();
             queue_overloaded = false;
             continue;
         }
@@ -79,8 +86,10 @@ fn watch(self: *Watcher) !void {
                 break; // incomplete event, loop to read rest
             var rem_info = rem_events[METADATA_SIZE..em[0].event_len];
             rem_events = rem_events[em[0].event_len..];
-            if (em[0].mask.Q_OVERFLOW)
+            if (em[0].mask.Q_OVERFLOW and !queue_overloaded) {
                 queue_overloaded = true;
+                self.logWarn("Fanotify queue overloaded. Flushing and polling all files.", .{});
+            }
             if (queue_overloaded)
                 continue;
             if (em[0].mask != fanotify.MarkMask{ .MOVED_TO = true })
@@ -89,7 +98,7 @@ fn watch(self: *Watcher) !void {
                 @panic("Excpected FAN_NOFD");
             while (rem_info.len > 0) {
                 const eif: [*]align(1) fanotify.event_info_fid = @ptrCast(rem_info);
-                self.process_fanotify_event(&eif[0]);
+                self.processFanotifyEvent(&eif[0]);
                 rem_info = rem_info[eif[0].hdr.len..];
             }
         }
@@ -97,7 +106,7 @@ fn watch(self: *Watcher) !void {
     }
 }
 
-fn process_fanotify_event(self: Watcher, eif: *align(1) fanotify.event_info_fid) void {
+fn processFanotifyEvent(self: Watcher, eif: *align(1) fanotify.event_info_fid) void {
     switch (eif.hdr.info_type) {
         .DFID_NAME => {
             const file_handle: *align(1) std.os.linux.file_handle = @ptrCast(&eif.handle);
@@ -120,7 +129,7 @@ fn @"Watch 'n catch 😎"(self: *Watcher) void {
     };
 }
 
-fn setup_watch(self: *Watcher) Errors!void {
+fn setupWatch(self: *Watcher) Errors!void {
     self.fan_fd = try errorCheckValue(
         std.os.linux.fanotify_init(
             .{ .REPORT_DIR_FID = true, .REPORT_NAME = true },
