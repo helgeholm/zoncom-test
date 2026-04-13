@@ -111,7 +111,11 @@ pub fn benchmark(alloc: std.mem.Allocator, updates: usize, space_writes: bool) !
 
     const ns_per_full_update = @divTrunc(write_diff, updates);
     const ns_per_single_update = @divTrunc(ns_per_full_update, keys);
-    logTime("Avg write time per single update", ns_per_single_update);
+    log.info("Avg per write: {d}ns, {d:.3}us, {d:.3}ms", .{
+        ns_per_single_update,
+        u_sec(ns_per_single_update),
+        m_sec(ns_per_single_update),
+    });
     const total_updates = keys * updates;
     while (receiver.delta_count < total_updates) {
         log.info("Waiting for remaining {d} updates to be received...", .{total_updates - receiver.delta_count});
@@ -119,10 +123,6 @@ pub fn benchmark(alloc: std.mem.Allocator, updates: usize, space_writes: bool) !
     }
     log.info("Latency quantiles:", .{});
     receiver.logBuckets();
-}
-
-fn logTime(comptime desc: []const u8, ns: i128) void {
-    log.info("{s}: {d}ns, {d:.3}us, {d:.3}ms", .{ desc, ns, u_sec(ns), m_sec(ns) });
 }
 
 fn m_sec(ns: i128) f32 {
